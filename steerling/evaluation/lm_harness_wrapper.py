@@ -338,7 +338,8 @@ class SteerlingLM(LM):
         for request in tqdm(requests, desc="generate_until"):
             context, gen_kwargs = request.args
             until = gen_kwargs.get("until", [])
-            max_gen_toks = gen_kwargs.get("max_gen_toks", self.max_gen_toks)
+            # Cap to our configured limit so task YAML can't inflate gen_length
+            max_gen_toks = min(gen_kwargs.get("max_gen_toks", self.max_gen_toks), self.max_gen_toks)
             temperature = gen_kwargs.get("temperature", 0.6)
 
             context_tokens = self.tok_encode(context) if context else []
@@ -357,7 +358,16 @@ class SteerlingLM(LM):
             # Round gen_length up to nearest block_length multiple
             block_length = self.diff_block_size
             gen_length = ((max_gen_toks + block_length - 1) // block_length) * block_length
-            steps = self.steps or gen_length
+            num_blocks = gen_length // block_length
+
+            # Derive steps_per_block from configured steps + configured gen_length,
+            # then scale to actual gen_length (lm-eval tasks can override max_gen_toks).
+            config_blocks = max(1, (self.max_gen_toks + block_length - 1) // block_length)
+            if self.steps is not None:
+                steps_per_block = max(1, round(self.steps / config_blocks))
+            else:
+                steps_per_block = block_length  # 1 step per token
+            steps = steps_per_block * num_blocks
 
             prompt_tensor = torch.tensor([context_tokens], dtype=torch.long, device=self._torch_device)
 

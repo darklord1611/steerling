@@ -28,12 +28,15 @@ class TaskSettings(BaseModel):
 
 # fmt: off
 TASK_DEFAULTS: dict[str, TaskSettings] = {
-    "hellaswag":     TaskSettings(num_fewshot=0, batch_size=32, mc_num=128, mc_batch_size=32, cfg=1.0),
-    "arc_challenge": TaskSettings(num_fewshot=0, batch_size=64, mc_num=128, mc_batch_size=32, cfg=1.0),
-    "winogrande":    TaskSettings(num_fewshot=5, batch_size=64, mc_num=128, mc_batch_size=32, cfg=1.5),
-    "piqa":          TaskSettings(num_fewshot=0, batch_size=64, mc_num=128, mc_batch_size=32, cfg=0.5),
-    "mmlu":          TaskSettings(num_fewshot=5, batch_size=8,  mc_num=1,   mc_batch_size=1,  cfg=0.0),
-    "gsm8k":         TaskSettings(num_fewshot=4, batch_size=8,  cfg=0.0, gen_length=256, steps=256),
+    "hellaswag":      TaskSettings(num_fewshot=0, batch_size=32, mc_num=128, mc_batch_size=32, cfg=1.0),
+    "arc_challenge":  TaskSettings(num_fewshot=0, batch_size=64, mc_num=128, mc_batch_size=32, cfg=1.0),
+    "winogrande":     TaskSettings(num_fewshot=5, batch_size=64, mc_num=128, mc_batch_size=32, cfg=1.5),
+    "piqa":           TaskSettings(num_fewshot=0, batch_size=64, mc_num=128, mc_batch_size=32, cfg=0.5),
+    "mmlu":           TaskSettings(num_fewshot=5, batch_size=8,  mc_num=1,   mc_batch_size=1,  cfg=0.0),
+    "gsm8k":          TaskSettings(num_fewshot=4, batch_size=8,  cfg=0.0, gen_length=256, steps=256),
+    # HHH evaluation tasks
+    "ifeval":         TaskSettings(num_fewshot=0, batch_size=1,  cfg=0.0, gen_length=512, steps=8),
+    "truthfulqa_mc2": TaskSettings(num_fewshot=0, batch_size=32, mc_num=16,  mc_batch_size=16, cfg=0.0),
 }
 # fmt: on
 

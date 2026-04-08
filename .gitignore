@@ -228,3 +228,12 @@ jobs/
 # Backup files from API migration
 *_old.py
 *_old.ipynb
+
+
+**output**/
+
+.claude/
+
+wandb/
+
+eval_results**/

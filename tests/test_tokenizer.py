@@ -3,12 +3,14 @@
 
 class TestSteerlingTokenizer:
     def test_special_token_ids(self, tokenizer):
-        assert tokenizer.vocab_size == 100281
+        assert tokenizer.vocab_size == 100283
         assert tokenizer.pad_token_id == 100277
         assert tokenizer.bos_token_id == 100278
         assert tokenizer.endofchunk_token_id == 100279
         assert tokenizer.mask_token_id == 100280
         assert tokenizer.eos_token_id == 100257
+        assert tokenizer.im_start_token_id == 100281
+        assert tokenizer.im_end_token_id == 100282
 
     def test_encode_decode_roundtrip(self, tokenizer):
         text = "Hello, world!"

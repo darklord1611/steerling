@@ -8,7 +8,9 @@ Token layout:
     100278:      <|bos|>
     100279:      <|endofchunk|>
     100280:      <|mask|>
-    vocab_size:  100281
+    100281:      <|im_start|> (ChatML turn start)
+    100282:      <|im_end|> (ChatML turn end)
+    vocab_size:  100283
 """
 
 from __future__ import annotations
@@ -36,7 +38,9 @@ class SteerlingTokenizer:
         self._endofchunk_token_id = base_vocab + 2  # 100279
         self._mask_token_id = base_vocab + 3  # 100280
         self._eos_token_id = base_enc._special_tokens["<|endoftext|>"]  # 100257
-        self._vocab_size = base_vocab + 4  # 100281
+        self._im_start_token_id = base_vocab + 4  # 100281
+        self._im_end_token_id = base_vocab + 5  # 100282
+        self._vocab_size = base_vocab + 6  # 100283
 
         # Create encoding with custom special tokens
         self._tokenizer = tiktoken.Encoding(
@@ -49,6 +53,8 @@ class SteerlingTokenizer:
                 "<|bos|>": self._bos_token_id,
                 "<|endofchunk|>": self._endofchunk_token_id,
                 "<|mask|>": self._mask_token_id,
+                "<|im_start|>": self._im_start_token_id,
+                "<|im_end|>": self._im_end_token_id,
             },
         )
 
@@ -58,6 +64,8 @@ class SteerlingTokenizer:
             self._eos_token_id,
             self._endofchunk_token_id,
             self._mask_token_id,
+            self._im_start_token_id,
+            self._im_end_token_id,
         }
 
     def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
@@ -72,7 +80,7 @@ class SteerlingTokenizer:
             List of token IDs
         """
 
-        tokens = self._tokenizer.encode(text, disallowed_special=())
+        tokens = self._tokenizer.encode(text, allowed_special="all")
         if add_special_tokens:
             tokens = [self._bos_token_id] + tokens + [self._eos_token_id]
         return tokens
@@ -123,3 +131,51 @@ class SteerlingTokenizer:
     @property
     def mask_token_id(self) -> int:
         return self._mask_token_id
+
+    @property
+    def im_start_token_id(self) -> int:
+        return self._im_start_token_id
+
+    @property
+    def im_end_token_id(self) -> int:
+        return self._im_end_token_id
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """
+        Format messages as a ChatML string.
+
+        Args:
+            messages: List of dicts with "role" and "content" keys.
+                      Supported roles: "system", "user", "assistant".
+            add_generation_prompt: If True, append the assistant turn header
+                                  (for inference). If False, close the last
+                                  assistant turn with <|im_end|> (for training).
+
+        Returns:
+            ChatML-formatted string.
+        """
+        parts: list[str] = []
+        for i, msg in enumerate(messages):
+            role = msg["role"]
+            content = msg["content"]
+            is_last = i == len(messages) - 1
+
+            parts.append(f"<|im_start|>{role}\n{content}")
+
+            if is_last and role == "assistant" and add_generation_prompt:
+                # During inference: leave the last assistant turn open
+                # (caller already provided a partial assistant message)
+                parts.append("<|im_end|>")
+            else:
+                parts.append("<|im_end|>\n")
+
+        if add_generation_prompt:
+            last_role = messages[-1]["role"] if messages else None
+            if last_role != "assistant":
+                parts.append("<|im_start|>assistant\n")
+
+        return "".join(parts)
