@@ -75,12 +75,19 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--max-steps", type=int, default=5000)
+    parser.add_argument("--max-steps", type=int, required=True,
+                        help="Total gradient update steps (use run_sft.py to auto-compute from epochs)")
     parser.add_argument("--warmup-steps", type=int, default=200)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--log-every", type=int, default=50)
-    parser.add_argument("--save-every", type=int, default=1000)
+    parser.add_argument("--save-every", type=int, default=200)
     parser.add_argument("--output-dir", type=str, default="sft_output_ddp")
+
+    # Performance (on by default; use --no-* to disable)
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True,
+                        help="Gradient checkpointing to reduce memory (default: on)")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
+                        help="torch.compile the model before DDP wrapping (default: on)")
 
     # Weights & Biases (always enabled)
     parser.add_argument("--wandb-project", type=str, default="steerling_hhh_sft")
@@ -170,14 +177,28 @@ def main() -> None:
     )
     model = setup_lora(model, sft_config)
 
+    # Gradient checkpointing — trades ~30% compute for ~2x memory savings
+    if args.gradient_checkpointing:
+        model.transformer.gradient_checkpointing_enable()
+        model.transformer.enable_input_require_grads()
+        if is_main:
+            logger.info("Gradient checkpointing enabled")
+
+    # torch.compile — fuses attention, norms, and MLP ops
+    if args.compile:
+        model = torch.compile(model)
+        if is_main:
+            logger.info("Model compiled with torch.compile")
+
     # Load LoRA + head weights before DDP wrapping (optimizer state loaded after)
     start_step = 0
     if args.resume_from:
         from steerling.training.sft_trainer import load_checkpoint
         start_step = load_checkpoint(model, args.resume_from, optimizer=None)
 
-    # Wrap in DDP — find_unused_parameters needed because base model params are frozen
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    # Wrap in DDP — static_graph caches unused-param detection after the first
+    # backward pass (safe because frozen vs trainable params never change).
+    model = DDP(model, device_ids=[local_rank], static_graph=True)
     base_model = model.module  # unwrapped reference for save/loss access
 
     if is_main:
@@ -203,8 +224,9 @@ def main() -> None:
         dataset,
         batch_size=args.batch_size,
         sampler=sampler,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True,
+        persistent_workers=True,
     )
 
     # --- Optimizer ---
@@ -213,7 +235,6 @@ def main() -> None:
 
     # Restore optimizer state after DDP wrapping (parameters must match)
     if args.resume_from:
-        import json
         from pathlib import Path as _Path
         from huggingface_hub import hf_hub_download
         is_local = _Path(args.resume_from).exists()
@@ -269,17 +290,23 @@ def main() -> None:
                 logits, outputs = model(noisy_ids, minimal_output=True)
                 l_token = compute_token_loss(logits, input_ids, noisy_ids, p_mask, tokenizer.mask_token_id)
                 l_rec   = compute_rec_loss(outputs.hidden, outputs.known_features, outputs.unk_hat)
-                l_indep = compute_indep_loss(
-                    base_model.known_head.concept_embedding.weight,
-                    base_model.unknown_head,
-                    sample_size=sft_config.indep_sample_size,
-                )
-                loss = l_token + args.lambda_rec * l_rec + args.lambda_indep * l_indep
+                loss = l_token + args.lambda_rec * l_rec
 
             (loss / args.gradient_accumulation_steps).backward()
             for k, v in [("loss", loss.item()), ("l_token", l_token.item()),
-                         ("l_rec", l_rec.item()), ("l_indep", l_indep.item())]:
+                         ("l_rec", l_rec.item())]:
                 accum[k] = accum.get(k, 0.0) + v / args.gradient_accumulation_steps
+
+        # Independence loss once per optimizer step (regularizer — no need per micro-step)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            l_indep = compute_indep_loss(
+                base_model.known_head.concept_embedding.weight,
+                base_model.unknown_head,
+                sample_size=sft_config.indep_sample_size,
+            )
+            (args.lambda_indep * l_indep).backward()
+        accum["l_indep"] = l_indep.item()
+        accum["loss"] = accum["loss"] + args.lambda_indep * l_indep.item()
 
         torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
         lr_mult = lr_schedule(step)

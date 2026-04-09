@@ -115,24 +115,36 @@ def diffusion_mask(
     """
     B, T = input_ids.shape
     device = input_ids.device
+    trainable = loss_mask == 1  # (B, T)
+
+    # Per-example mask rates uniformly in (0, 1]
+    rates = torch.rand(B, 1, device=device).clamp_min(1e-3)  # (B, 1)
+
+    # Random scores only at trainable positions; non-trainable get 2.0 (never selected)
+    rand_scores = torch.where(trainable, torch.rand(B, T, device=device), torch.full((B, T), 2.0, device=device))
+
+    # Count trainable tokens per example
+    n_trainable = trainable.sum(dim=1, keepdim=True).float()  # (B, 1)
+
+    # Number of tokens to mask (at least 1 where there are trainable tokens)
+    n_to_mask = (rates * n_trainable).clamp_min(1.0).floor()  # (B, 1)
+
+    # Threshold: mask the n_to_mask lowest-scoring trainable positions per row.
+    # Sort scores and pick the n_to_mask-th value as threshold.
+    sorted_scores, _ = rand_scores.sort(dim=1)  # (B, T)
+    # Gather the threshold at position n_to_mask-1 (0-indexed)
+    threshold_idx = (n_to_mask - 1).long().clamp(min=0, max=T - 1)  # (B, 1)
+    thresholds = sorted_scores.gather(1, threshold_idx)  # (B, 1)
+
+    to_mask = trainable & (rand_scores <= thresholds)  # (B, T)
 
     noisy = input_ids.clone()
-    p_mask = torch.zeros(B, 1, device=device)
+    noisy[to_mask] = mask_token_id
 
-    for i in range(B):
-        trainable_positions = (loss_mask[i] == 1).nonzero(as_tuple=True)[0]
-        n_trainable = trainable_positions.shape[0]
-        if n_trainable == 0:
-            p_mask[i] = 1.0
-            continue
-
-        # Sample mask rate uniformly from (0, 1]
-        rate = torch.rand(1, device=device).clamp_min(1e-3).item()
-        n_to_mask = max(1, int(rate * n_trainable))
-        perm = torch.randperm(n_trainable, device=device)[:n_to_mask]
-        positions_to_mask = trainable_positions[perm]
-        noisy[i, positions_to_mask] = mask_token_id
-        p_mask[i] = n_to_mask / n_trainable
+    # Actual mask rate
+    p_mask = to_mask.sum(dim=1, keepdim=True).float() / n_trainable.clamp_min(1.0)
+    # Examples with no trainable tokens get p_mask=1
+    p_mask = torch.where(n_trainable > 0, p_mask, torch.ones_like(p_mask))
 
     return noisy, p_mask.clamp_min(1e-6)
 

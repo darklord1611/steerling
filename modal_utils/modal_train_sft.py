@@ -26,6 +26,7 @@ training_image = (
         "datasets>=2.0.0",
         "peft>=0.10.0",
         "tqdm",
+        "wandb"
     )
 )
 
@@ -50,7 +51,7 @@ def train_sft_ddp(
     num_gpus: int = 4,
     model: str = "guidelabs/steerling-8b",
     hf_dataset_id: str = "darklord1611/tulu-3-sft-mixture-english-clean",
-    max_steps: int = 5000,
+    max_steps: int = 44_812,
     max_seq_len: int = 2048,
     batch_size: int = 1,
     gradient_accumulation_steps: int = 8,
@@ -61,7 +62,7 @@ def train_sft_ddp(
     lambda_rec: float = 0.1,
     lambda_indep: float = 0.01,
     warmup_steps: int = 200,
-    save_every: int = 1000,
+    save_every: int = 200,
     log_every: int = 50,
     output_dir: str = "/checkpoints/sft_output",
     resume_from: str | None = None,
@@ -99,12 +100,19 @@ def train_sft_ddp(
     """
     import os
     import subprocess
+    import threading
+    import torch
+
+    # Auto-detect GPU count from what Modal actually allocated
+    detected_gpus = torch.cuda.device_count()
+    num_gpus = detected_gpus
+    effective_bs = batch_size * num_gpus * gradient_accumulation_steps
 
     print("=== Steerling SFT Training on Modal ===")
     print(f"Repository: {repo_url}  branch: {branch}")
     print(f"Model: {model}")
-    print(f"GPUs: {num_gpus}  steps: {max_steps}  seq_len: {max_seq_len}")
-    print(f"Effective batch size: {batch_size * num_gpus * gradient_accumulation_steps}")
+    print(f"GPUs: {num_gpus} (detected: {detected_gpus})  steps: {max_steps}  seq_len: {max_seq_len}")
+    print(f"Effective batch size: {effective_bs}")
 
     github_token = os.environ["GITHUB_TOKEN"]
 
@@ -134,6 +142,23 @@ def train_sft_ddp(
         check=True,
     )
     print("✓ steerling package installed")
+
+    # --- Background volume committer ---
+    # Commits every 5 minutes so crash recovery loses at most one save interval.
+    # The training script saves every `save_every` steps; this ensures those
+    # writes are persisted to the Modal volume even if the container dies.
+    _stop = threading.Event()
+
+    def _auto_commit(interval: int = 300) -> None:
+        while not _stop.wait(timeout=interval):
+            try:
+                checkpoint_volume.commit()
+                print(f"[volume] Auto-committed checkpoint volume")
+            except Exception as e:
+                print(f"[volume] Warning: auto-commit failed: {e}")
+
+    _commit_thread = threading.Thread(target=_auto_commit, daemon=True)
+    _commit_thread.start()
 
     # --- Build torchrun command ---
     print("\n[2/3] Starting DDP training...")
@@ -167,12 +192,14 @@ def train_sft_ddp(
 
     print(f"Command: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=repo_dir)
-    if result.returncode != 0:
-        raise RuntimeError(f"Training failed with exit code {result.returncode}")
 
-    # --- Commit checkpoints ---
+    # --- Final commit ---
+    _stop.set()
     print("\n[3/3] Committing checkpoints...")
     checkpoint_volume.commit()
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Training failed with exit code {result.returncode}")
 
     final_ckpt = f"{output_dir}/final"
     print(f"✓ Training complete. Checkpoint: {final_ckpt}")
@@ -196,7 +223,7 @@ def train_sft_ddp(
 def train_sft_single(
     model: str = "guidelabs/steerling-8b",
     hf_dataset_id: str = "darklord1611/tulu-3-sft-mixture-english-clean",
-    max_steps: int = 1000,
+    max_steps: int = 716_987,
     max_seq_len: int = 2048,
     batch_size: int = 1,
     gradient_accumulation_steps: int = 1,
@@ -244,6 +271,7 @@ def train_sft_single(
     """
     import os
     import subprocess
+    import threading
 
     print("=== Steerling SFT Training on Modal (single GPU) ===")
     print(f"Repository: {repo_url}  branch: {branch}")
@@ -305,14 +333,29 @@ def train_sft_single(
     if wandb_run_name:
         cmd += ["--wandb-run-name", wandb_run_name]
 
+    # --- Background volume committer ---
+    _stop = threading.Event()
+
+    def _auto_commit(interval: int = 300) -> None:
+        while not _stop.wait(timeout=interval):
+            try:
+                checkpoint_volume.commit()
+                print("[volume] Auto-committed checkpoint volume")
+            except Exception as e:
+                print(f"[volume] Warning: auto-commit failed: {e}")
+
+    threading.Thread(target=_auto_commit, daemon=True).start()
+
     print(f"Command: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=repo_dir)
-    if result.returncode != 0:
-        raise RuntimeError(f"Training failed with exit code {result.returncode}")
 
-    # --- Commit checkpoints ---
+    # --- Final commit ---
+    _stop.set()
     print("\n[3/3] Committing checkpoints...")
     checkpoint_volume.commit()
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Training failed with exit code {result.returncode}")
 
     final_ckpt = f"{output_dir}/final"
     print(f"✓ Training complete. Checkpoint: {final_ckpt}")

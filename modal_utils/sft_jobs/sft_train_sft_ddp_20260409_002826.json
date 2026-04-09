@@ -1,0 +1,10 @@
+{
+  "job_id": "sft_train_sft_ddp_20260409_002826",
+  "function_name": "train_sft_ddp",
+  "function_call_id": "fc-01KNQT7T5VE3C28PNY1DJW4R7Q",
+  "status": "pending",
+  "checkpoint_path": null,
+  "error": null,
+  "created_at": "2026-04-09T00:28:26.220845",
+  "completed_at": null
+}
