@@ -83,9 +83,7 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=200)
     parser.add_argument("--output-dir", type=str, default="sft_output_ddp")
 
-    # Performance (on by default; use --no-* to disable)
-    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True,
-                        help="Gradient checkpointing to reduce memory (default: on)")
+    # Performance (on by default; use --no-compile to disable)
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
                         help="torch.compile the model before DDP wrapping (default: on)")
 
@@ -176,14 +174,6 @@ def main() -> None:
         output_dir=args.output_dir,
     )
     model = setup_lora(model, sft_config)
-
-    # Gradient checkpointing — trades ~30% compute for ~2x memory savings
-    if args.gradient_checkpointing:
-        # Call on the underlying CausalDiffusionLM (unwrap PEFT wrapper)
-        base_transformer = model.transformer.base_model.model if hasattr(model.transformer, "base_model") else model.transformer
-        base_transformer.gradient_checkpointing_enable()
-        if is_main:
-            logger.info("Gradient checkpointing enabled")
 
     # torch.compile — fuses attention, norms, and MLP ops
     if args.compile:
