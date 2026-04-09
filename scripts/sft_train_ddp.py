@@ -188,7 +188,7 @@ def main() -> None:
 
     # Wrap in DDP — static_graph caches unused-param detection after the first
     # backward pass (safe because frozen vs trainable params never change).
-    model = DDP(model, device_ids=[local_rank], static_graph=True)
+    model = DDP(model, device_ids=[local_rank])
     base_model = model.module  # unwrapped reference for save/loss access
 
     if is_main:
