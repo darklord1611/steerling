@@ -141,7 +141,7 @@ async def submit_job(
     _ensure_deployed()
 
     # Ensure dataset cache exists on the volume before training starts
-    await prepare_dataset(max_seq_len=max_seq_len, output_dir=output_dir, branch=branch)
+    # await prepare_dataset(max_seq_len=max_seq_len, output_dir=output_dir, branch=branch)
 
     _num_gpus = 1 if single_gpu else num_gpus
     max_steps = _compute_max_steps(num_epochs, _num_gpus, batch_size, gradient_accumulation_steps)
@@ -271,7 +271,7 @@ def main() -> None:
     # submit
     sp = sub.add_parser("submit", help="Spawn a training job (returns immediately)")
     sp.add_argument("--single-gpu", action="store_true", help="Single-GPU run instead of 4×GPU DDP")
-    sp.add_argument("--num-gpus", type=int, default=2, help="GPUs allocated (must match modal_train_sft.py gpu= count)")
+    sp.add_argument("--num-gpus", type=int, default=4, help="GPUs allocated (must match modal_train_sft.py gpu= count)")
     sp.add_argument("--num-epochs", type=int, default=1, help="Full passes over the dataset")
     sp.add_argument("--max-seq-len", type=int, default=2048)
     sp.add_argument("--batch-size", type=int, default=1)
@@ -282,7 +282,7 @@ def main() -> None:
     sp.add_argument("--lora-dropout", type=float, default=0.05)
     sp.add_argument("--lambda-rec", type=float, default=0.1)
     sp.add_argument("--lambda-indep", type=float, default=0.01)
-    sp.add_argument("--save-every", type=int, default=200)
+    sp.add_argument("--save-every", type=int, default=100)
     sp.add_argument("--log-every", type=int, default=50)
     sp.add_argument("--output-dir", default="/checkpoints/sft_output")
     sp.add_argument("--resume-from", default=None)
@@ -304,6 +304,7 @@ def main() -> None:
     sub.add_parser("list", help="List all jobs")
 
     args = parser.parse_args()
+
 
     if args.command == "prepare":
         asyncio.run(prepare_dataset(

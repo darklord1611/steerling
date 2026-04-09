@@ -236,4 +236,5 @@ jobs/
 
 wandb/
 
-eval_results**/
+**results**/
+IFBench

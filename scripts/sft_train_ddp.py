@@ -81,7 +81,7 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=200)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--log-every", type=int, default=50)
-    parser.add_argument("--save-every", type=int, default=200)
+    parser.add_argument("--save-every", type=int, default=100)
     parser.add_argument("--output-dir", type=str, default="sft_output_ddp")
 
     # Performance (on by default; use --no-compile to disable)
