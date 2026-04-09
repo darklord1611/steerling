@@ -202,7 +202,7 @@ def main() -> None:
     # Falls back to on-the-fly tokenisation if cache is missing.
     from steerling.data.sft_dataset import Tulu3SFTDataset
 
-    dataset_cache = Path(args.output_dir).parent / "dataset_cache.pt"
+    dataset_cache = Path(args.output_dir) / "dataset_cache.pt"
     if dataset_cache.exists():
         if is_main:
             logger.info(f"Loading pre-tokenised dataset from {dataset_cache}")
