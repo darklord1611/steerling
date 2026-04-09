@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -176,6 +175,12 @@ def main() -> None:
     )
     model = setup_lora(model, sft_config)
 
+    # torch.compile — fuses attention, norms, and MLP ops
+    if args.compile:
+        model = torch.compile(model)
+        if is_main:
+            logger.info("Model compiled with torch.compile")
+
     # Load LoRA + head weights before DDP wrapping (optimizer state loaded after)
     start_step = 0
     if args.resume_from:
@@ -185,12 +190,6 @@ def main() -> None:
     # Wrap in DDP — static_graph caches unused-param detection after the first
     # backward pass (safe because frozen vs trainable params never change).
     model = DDP(model, device_ids=[local_rank], static_graph=True)
-
-    # torch.compile after DDP wrapping (recommended order for PyTorch 2.x)
-    if args.compile:
-        model = torch.compile(model)
-        if is_main:
-            logger.info("Model compiled with torch.compile")
     base_model = model.module  # unwrapped reference for save/loss access
 
     if is_main:
@@ -204,29 +203,36 @@ def main() -> None:
     from steerling.data.sft_dataset import Tulu3SFTDataset
 
     dataset_cache = Path(args.output_dir) / "dataset_cache.pt"
-    assert dataset_cache.exists(), (
-        f"Pre-tokenised dataset required for DDP: {dataset_cache}\n"
-        "Run: python modal_utils/run_sft.py prepare"
-    )
-    if is_main:
-        logger.info(f"Loading pre-tokenised dataset from {dataset_cache}")
-    examples = torch.load(dataset_cache, weights_only=False)
-    dataset = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
-    dataset.tokenizer = tokenizer
-    dataset.max_seq_len = args.max_seq_len
-    dataset.examples = examples
-    if is_main:
-        logger.info(f"Dataset: {len(dataset):,} examples (from cache)")
+    if dataset_cache.exists():
+        if is_main:
+            logger.info(f"Loading pre-tokenised dataset from {dataset_cache}")
+        examples = torch.load(dataset_cache, weights_only=False)
+        dataset = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
+        dataset.tokenizer = tokenizer
+        dataset.max_seq_len = args.max_seq_len
+        dataset.examples = examples
+        if is_main:
+            logger.info(f"Dataset: {len(dataset):,} examples (from cache)")
+    else:
+        if is_main:
+            logger.warning("No dataset cache found — tokenising on the fly (slow)")
+        dataset = Tulu3SFTDataset(
+            tokenizer,
+            max_seq_len=args.max_seq_len,
+            seed=args.seed,
+            hf_dataset_id=args.hf_dataset_id,
+        )
+        if is_main:
+            logger.info(f"Dataset: {len(dataset):,} examples")
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         sampler=sampler,
-        num_workers=8,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
-        drop_last=True,
     )
 
     # --- Optimizer ---
@@ -273,8 +279,7 @@ def main() -> None:
         optimizer.zero_grad()
         accum: dict[str, float] = {}
 
-        grad_accum = args.gradient_accumulation_steps
-        for micro in range(grad_accum):
+        for _ in range(args.gradient_accumulation_steps):
             try:
                 batch = next(data_iter)
             except StopIteration:
@@ -287,35 +292,27 @@ def main() -> None:
             loss_mask = batch["loss_mask"].to(device)
             noisy_ids, p_mask = diffusion_mask(input_ids, loss_mask, tokenizer.mask_token_id)
 
-            # Skip gradient sync on non-final micro-steps (~1.5-2× speedup)
-            sync_ctx = model.no_sync() if micro < grad_accum - 1 else nullcontext()
-            with sync_ctx:
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits, outputs = model(noisy_ids, minimal_output=True)
-                    l_token = compute_token_loss(
-                        logits, input_ids, noisy_ids, p_mask, tokenizer.mask_token_id,
-                    )
-                    l_rec = compute_rec_loss(
-                        outputs.hidden, outputs.known_features, outputs.unk_hat,
-                    )
-                    loss = l_token + args.lambda_rec * l_rec
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits, outputs = model(noisy_ids, minimal_output=True)
+                l_token = compute_token_loss(logits, input_ids, noisy_ids, p_mask, tokenizer.mask_token_id)
+                l_rec   = compute_rec_loss(outputs.hidden, outputs.known_features, outputs.unk_hat)
+                loss = l_token + args.lambda_rec * l_rec
 
-                    # Indep loss on last micro-step (single backward for DDP sync)
-                    if micro == grad_accum - 1:
-                        l_indep = compute_indep_loss(
-                            base_model.known_head.concept_embedding.weight,
-                            base_model.unknown_head,
-                            sample_size=sft_config.indep_sample_size,
-                        )
-                        loss = loss + args.lambda_indep * l_indep
+            (loss / args.gradient_accumulation_steps).backward()
+            for k, v in [("loss", loss.item()), ("l_token", l_token.item()),
+                         ("l_rec", l_rec.item())]:
+                accum[k] = accum.get(k, 0.0) + v / args.gradient_accumulation_steps
 
-                (loss / grad_accum).backward()
-
-            for k, v in [("l_token", l_token.item()), ("l_rec", l_rec.item())]:
-                accum[k] = accum.get(k, 0.0) + v / grad_accum
+        # Independence loss once per optimizer step (regularizer — no need per micro-step)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            l_indep = compute_indep_loss(
+                base_model.known_head.concept_embedding.weight,
+                base_model.unknown_head,
+                sample_size=sft_config.indep_sample_size,
+            )
+            (args.lambda_indep * l_indep).backward()
         accum["l_indep"] = l_indep.item()
-        # Recompute total from components so weights are applied consistently
-        accum["loss"] = accum["l_token"] + args.lambda_rec * accum["l_rec"] + args.lambda_indep * accum["l_indep"]
+        accum["loss"] = accum["loss"] + args.lambda_indep * l_indep.item()
 
         torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
         lr_mult = lr_schedule(step)
@@ -324,33 +321,16 @@ def main() -> None:
         optimizer.step()
         step += 1
 
-        # All-reduce losses for accurate global logging across all GPUs
-        if step % args.log_every == 0:
-            loss_tensor = torch.tensor(
-                [accum["l_token"], accum["l_rec"], accum["l_indep"]],
-                device=device,
-            )
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-            avg_token = loss_tensor[0].item()
-            avg_rec = loss_tensor[1].item()
-            avg_indep = loss_tensor[2].item()
-            avg_loss = avg_token + args.lambda_rec * avg_rec + args.lambda_indep * avg_indep
-            accum = {
-                "loss": avg_loss,
-                "l_token": avg_token,
-                "l_rec": avg_rec,
-                "l_indep": avg_indep,
-            }
+        if is_main and step % args.log_every == 0:
             current_lr = args.lr * lr_mult
-            if is_main:
-                logger.info(
-                    f"step {step}/{args.max_steps} | "
-                    f"loss={accum['loss']:.4f} | l_token={accum['l_token']:.4f} | "
-                    f"l_rec={accum['l_rec']:.4f} | l_indep={accum['l_indep']:.6f} | "
-                    f"lr={current_lr:.2e}"
-                )
-                if _wandb is not None:
-                    _wandb.log({**accum, "lr": current_lr}, step=step)
+            logger.info(
+                f"step {step}/{args.max_steps} | "
+                f"loss={accum['loss']:.4f} | l_token={accum['l_token']:.4f} | "
+                f"l_rec={accum['l_rec']:.4f} | l_indep={accum['l_indep']:.6f} | "
+                f"lr={current_lr:.2e}"
+            )
+            if _wandb is not None:
+                _wandb.log({**accum, "lr": current_lr}, step=step)
 
         if is_main and step % args.save_every == 0:
             _save(base_model, Path(args.output_dir) / f"checkpoint-{step}", optimizer, step)
