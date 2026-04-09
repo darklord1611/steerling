@@ -198,32 +198,32 @@ def main() -> None:
         logger.info(f"Trainable: {trainable/1e6:.1f}M / {total/1e9:.2f}B")
 
     # --- Dataset ---
-    # Rank 0 downloads + tokenises, then broadcasts the processed examples
-    # so other ranks don't redundantly download / tokenise 717K rows each.
+    # Load pre-tokenised cache (built by prepare_dataset Modal function).
+    # Falls back to on-the-fly tokenisation if cache is missing.
     from steerling.data.sft_dataset import Tulu3SFTDataset
-    if is_main:
-        logger.info(f"Loading dataset: {args.hf_dataset_id}")
+
+    dataset_cache = Path(args.output_dir).parent / "dataset_cache.pt"
+    if dataset_cache.exists():
+        if is_main:
+            logger.info(f"Loading pre-tokenised dataset from {dataset_cache}")
+        examples = torch.load(dataset_cache, weights_only=False)
+        dataset = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
+        dataset.tokenizer = tokenizer
+        dataset.max_seq_len = args.max_seq_len
+        dataset.examples = examples
+        if is_main:
+            logger.info(f"Dataset: {len(dataset):,} examples (from cache)")
+    else:
+        if is_main:
+            logger.warning("No dataset cache found — tokenising on the fly (slow)")
         dataset = Tulu3SFTDataset(
             tokenizer,
             max_seq_len=args.max_seq_len,
             seed=args.seed,
             hf_dataset_id=args.hf_dataset_id,
         )
-        logger.info(f"Dataset: {len(dataset):,} examples")
-        examples = dataset.examples
-    else:
-        examples = None
-
-    # Broadcast pre-tokenised examples from rank 0
-    object_list = [examples]
-    dist.broadcast_object_list(object_list, src=0)
-    examples = object_list[0]
-
-    if not is_main:
-        dataset = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
-        dataset.tokenizer = tokenizer
-        dataset.max_seq_len = args.max_seq_len
-        dataset.examples = examples
+        if is_main:
+            logger.info(f"Dataset: {len(dataset):,} examples")
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(

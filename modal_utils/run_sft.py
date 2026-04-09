@@ -98,6 +98,25 @@ def _compute_max_steps(num_epochs: int, num_gpus: int, batch_size: int, grad_acc
     return math.ceil(DATASET_SIZE / effective_bs) * num_epochs
 
 
+async def prepare_dataset(
+    max_seq_len: int = 2048,
+    output_dir: str = "/checkpoints/sft_output",
+    branch: str = "main",
+) -> dict:
+    """Run the dataset preparation function (blocking) and return its result."""
+    _ensure_deployed()
+    func = modal.Function.from_name(APP_NAME, "prepare_dataset")
+    print("Preparing dataset (download + tokenise)...")
+    with modal.enable_output():
+        result = await func.remote.aio(
+            max_seq_len=max_seq_len,
+            output_dir=output_dir,
+            branch=branch,
+        )
+    print(f"✓ Dataset ready: {result['n_examples']:,} examples at {result['cache_path']}")
+    return result
+
+
 async def submit_job(
     single_gpu: bool = False,
     num_gpus: int = 2,             # must match the gpu= count in modal_train_sft.py
@@ -120,6 +139,9 @@ async def submit_job(
 ) -> JobStatus:
     """Spawn an SFT training job and return immediately."""
     _ensure_deployed()
+
+    # Ensure dataset cache exists on the volume before training starts
+    await prepare_dataset(max_seq_len=max_seq_len, output_dir=output_dir, branch=branch)
 
     _num_gpus = 1 if single_gpu else num_gpus
     max_steps = _compute_max_steps(num_epochs, _num_gpus, batch_size, gradient_accumulation_steps)
@@ -240,6 +262,12 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # prepare
+    pp = sub.add_parser("prepare", help="Download and pre-tokenise dataset (no GPU needed)")
+    pp.add_argument("--max-seq-len", type=int, default=2048)
+    pp.add_argument("--output-dir", default="/checkpoints/sft_output")
+    pp.add_argument("--branch", default="main")
+
     # submit
     sp = sub.add_parser("submit", help="Spawn a training job (returns immediately)")
     sp.add_argument("--single-gpu", action="store_true", help="Single-GPU run instead of 4×GPU DDP")
@@ -277,7 +305,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "submit":
+    if args.command == "prepare":
+        asyncio.run(prepare_dataset(
+            max_seq_len=args.max_seq_len,
+            output_dir=args.output_dir,
+            branch=args.branch,
+        ))
+
+    elif args.command == "submit":
         job = asyncio.run(submit_job(
             single_gpu=args.single_gpu,
             num_gpus=args.num_gpus,

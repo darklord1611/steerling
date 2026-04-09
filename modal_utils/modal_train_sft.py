@@ -35,6 +35,74 @@ app = modal.App("steerling-sft-training")
 
 @app.function(
     image=training_image,
+    gpu="A100-80GB:1",
+    timeout=60 * 60,  # 1 hour
+    secrets=[
+        modal.Secret.from_name("github-secret"),
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+    volumes={
+        "/checkpoints": checkpoint_volume,
+        "/root/.cache/huggingface": hf_cache,
+    },
+)
+def prepare_dataset(
+    hf_dataset_id: str = "darklord1611/tulu-3-sft-mixture-english-clean",
+    max_seq_len: int = 2048,
+    seed: int = 42,
+    output_dir: str = "/checkpoints/sft_output",
+    repo_url: str = "https://github.com/darklord1611/steerling.git",
+    branch: str = "main",
+) -> dict:
+    """Download and pre-tokenise the SFT dataset, saving to the checkpoint volume.
+
+    Run this once before training so that all DDP ranks can load the cache
+    instantly instead of each downloading + tokenising 700K+ examples.
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    print("=== Preparing SFT dataset ===")
+    github_token = os.environ["GITHUB_TOKEN"]
+
+    # Clone repo for tokenizer + dataset code
+    auth_url = repo_url.replace("https://", f"https://{github_token}@")
+    repo_dir = "/root/steerling"
+    subprocess.run(
+        ["git", "clone", "-b", branch, "--depth", "1", auth_url, repo_dir],
+        check=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        capture_output=True, text=True,
+    )
+    subprocess.run(["pip", "install", "--no-deps", "-e", "."], cwd=repo_dir, check=True)
+
+    import sys
+    sys.path.insert(0, repo_dir)
+    import torch
+    from steerling.inference.causal_diffusion import SteerlingGenerator
+
+    print("Loading tokenizer from guidelabs/steerling-8b...")
+    generator = SteerlingGenerator.from_pretrained("guidelabs/steerling-8b", device="cpu")
+    tokenizer = generator.tokenizer
+    del generator  # free memory
+
+    from steerling.data.sft_dataset import Tulu3SFTDataset
+    print(f"Tokenising {hf_dataset_id} (max_seq_len={max_seq_len})...")
+    dataset = Tulu3SFTDataset(
+        tokenizer, max_seq_len=max_seq_len, seed=seed, hf_dataset_id=hf_dataset_id,
+    )
+
+    cache_path = Path(output_dir) / "dataset_cache.pt"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(dataset.examples, cache_path)
+    print(f"✓ Saved {len(dataset):,} examples to {cache_path}")
+
+    checkpoint_volume.commit()
+    return {"status": "success", "n_examples": len(dataset), "cache_path": str(cache_path)}
+
+
+@app.function(
+    image=training_image,
     gpu="H100:4",
     timeout=60 * 60 * 24,  # 24 hours
     secrets=[
