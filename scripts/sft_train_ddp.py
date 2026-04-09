@@ -186,11 +186,11 @@ def main() -> None:
     # backward pass (safe because frozen vs trainable params never change).
     model = DDP(model, device_ids=[local_rank], static_graph=True)
 
-    # torch.compile after DDP wrapping (recommended order for PyTorch 2.x)
-    if args.compile:
-        model = torch.compile(model)
-        if is_main:
-            logger.info("Model compiled with torch.compile")
+    # NOTE: torch.compile is disabled — it triggers an internal assert in
+    # DDP's reducer when combined with static_graph + no_sync() on PyTorch 2.8.
+    # The no_sync() speedup (~1.5-2×) outweighs compile gains here.
+    if args.compile and is_main:
+        logger.warning("--compile ignored: incompatible with DDP static_graph + no_sync() on PyTorch 2.8")
     base_model = model.module  # unwrapped reference for save/loss access
 
     if is_main:
