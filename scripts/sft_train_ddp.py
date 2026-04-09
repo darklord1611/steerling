@@ -179,8 +179,9 @@ def main() -> None:
 
     # Gradient checkpointing — trades ~30% compute for ~2x memory savings
     if args.gradient_checkpointing:
-        model.transformer.gradient_checkpointing_enable()
-        model.transformer.enable_input_require_grads()
+        # Call on the underlying CausalDiffusionLM (unwrap PEFT wrapper)
+        base_transformer = model.transformer.base_model.model if hasattr(model.transformer, "base_model") else model.transformer
+        base_transformer.gradient_checkpointing_enable()
         if is_main:
             logger.info("Gradient checkpointing enabled")
 

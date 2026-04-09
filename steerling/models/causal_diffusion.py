@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from steerling.configs.causal_diffusion import CausalDiffusionConfig
 from steerling.models.layers.causal_diffusion_layers import CausalDiffusionBlock
@@ -50,6 +51,16 @@ class CausalDiffusionLM(nn.Module):
         if config.weight_sharing:
             self.tok_emb.weight = self.lm_head.weight
 
+        self._gradient_checkpointing = False
+
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing to trade compute for memory."""
+        self._gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing."""
+        self._gradient_checkpointing = False
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -76,7 +87,10 @@ class CausalDiffusionLM(nn.Module):
             raise ValueError("Either input_ids or input_embeds must be provided")
 
         for block in self.blocks:
-            x = block(x)
+            if self._gradient_checkpointing and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = self.ln_f(x)
 
