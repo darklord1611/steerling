@@ -238,3 +238,5 @@ wandb/
 
 **results**/
 IFBench
+
+modal_utils/sft_jobs/

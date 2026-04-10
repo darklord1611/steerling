@@ -18,6 +18,8 @@ IFBENCH_DIR="$PROJECT_ROOT/IFBench"
 BASE_MODEL="${BASE_MODEL:-guidelabs/steerling-8b}"
 SFT_CKPT="${SFT_CKPT:-sft_output/final}"
 RESULTS_ROOT="${RESULTS_ROOT:-ifbench_results}"
+# Make RESULTS_ROOT absolute so it stays valid after cd into IFBench dir
+[[ "$RESULTS_ROOT" != /* ]] && RESULTS_ROOT="$PROJECT_ROOT/$RESULTS_ROOT"
 GEN_LENGTH="${GEN_LENGTH:-512}"
 STEPS="${STEPS:-64}"
 DEVICE="${DEVICE:-cuda}"
