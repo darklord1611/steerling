@@ -422,11 +422,14 @@ class SFTTrainer:
             "l_indep": l_indep.item(),
         }
 
-    def train(self, dataloader: DataLoader) -> list[dict[str, float]]:
+    def train(self, dataloader: DataLoader, start_step: int = 0) -> list[dict[str, float]]:
         """Run the full training loop.
 
         Args:
             dataloader: DataLoader yielding batches with "input_ids" and "loss_mask".
+            start_step: Resumed step count (from `load_checkpoint`). The LR
+                schedule and the `while step < max_steps` loop both respect
+                this so a resumed run doesn't re-warm-up from zero.
 
         Returns:
             List of per-step loss dicts.
@@ -434,7 +437,7 @@ class SFTTrainer:
         self.model.train()
         history: list[dict[str, float]] = []
         data_iter = iter(dataloader)
-        step = 0
+        step = start_step
 
         while step < self.config.max_steps:
             self.optimizer.zero_grad()

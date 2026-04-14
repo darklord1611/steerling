@@ -35,7 +35,9 @@ dependencies = [
     "pydantic ~= 2.10.0",
     "numpy ~= 2.3.0",
     "pandas ~= 2.2.3",
+    "peft"
 ]
+
 
 # LM evaluation harness
 [project.optional-dependencies]
@@ -69,6 +71,20 @@ type-check = [
     "ty",
 ]
 
+# IFBench evaluation (scripts/eval_ifbench.sh)
+# setuptools<81 pin: syllapy imports pkg_resources, removed in setuptools >=81
+ifbench = [
+    "absl-py",
+    "langdetect",
+    "nltk",
+    "immutabledict",
+    "spacy",
+    "emoji",
+    "syllapy",
+    "unicodedata2",
+    "setuptools<81",
+]
+
 # Everything for development
 dev = [
     "steerling[eval]",
@@ -76,6 +92,7 @@ dev = [
     "steerling[test]",
     "steerling[dev-tools]",
     "steerling[type-check]",
+    "steerling[ifbench]",
 ]
 
 [project.urls]

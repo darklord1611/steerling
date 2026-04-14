@@ -113,6 +113,43 @@ TASKS="hellaswag arc_challenge" bash scripts/eval_steerling_lm_eval.sh
 python scripts/evaluate.py --model guidelabs/steerling-8b --tasks hellaswag arc_challenge
 ```
 
+## Fine-Tuning (SFT)
+
+LoRA-based supervised fine-tuning on [Tulu-3](https://huggingface.co/datasets/darklord1611/tulu-3-sft-mixture-english-clean) with three concept-aware losses (ℒ_token + λ_rec·ℒ_rec + λ_indep·ℒ_indep).
+
+```bash
+# Single-GPU — start a fresh run (1 epoch, auto max-steps)
+python scripts/sft_train.py --model guidelabs/steerling-8b --output-dir sft_output
+
+# Single-GPU — resume from a HuggingFace checkpoint
+python scripts/sft_train.py \
+    --resume-from darklord1611/steerling-8b-sft-tulu3-ckpt-6900 \
+    --output-dir sft_output
+
+# Multi-GPU (DDP) — N GPUs, same flags
+torchrun --nproc_per_node=N scripts/sft_train_ddp.py \
+    --resume-from darklord1611/steerling-8b-sft-tulu3-ckpt-6900 \
+    --output-dir sft_output_ddp
+```
+
+**First run** builds `dataset_cache.pt` in `--output-dir` (downloads + tokenizes ~717k Tulu-3 examples). Every later run — fresh or resumed — reuses that cache. For DDP, rank-0 builds and the rest wait on a barrier.
+
+**Schedule is auto-computed**: `--num-epochs` (default `1`) → `max_steps = ceil(len(dataset) / (batch × world × grad_accum)) × num_epochs`, with 1% warmup. Pass `--max-steps` / `--warmup-steps` to override.
+
+**Resume** picks up LoRA adapter + head weights + optimizer state + step count from the checkpoint — the LR schedule continues from where it left off rather than re-warming-up. Checkpoints can be a local directory or a HuggingFace repo ID.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--model` | `guidelabs/steerling-8b` | HF repo or local path |
+| `--resume-from` | `None` | Local checkpoint dir or HF repo ID |
+| `--num-epochs` | `1` | Used to derive `max-steps` |
+| `--batch-size` / `--gradient-accumulation-steps` | `1` / `8` | Per-GPU batch; effective bs = `batch × world × accum` |
+| `--max-seq-len` | `3072` (single) / `2048` (DDP) | Must be divisible by 64 |
+| `--lora-r` / `--lora-alpha` | `16` / `32` | Targets `c_attn`, `c_proj` |
+| `--lambda-rec` / `--lambda-indep` | `0.1` / `0.01` | |
+
+See [CLAUDE.md](CLAUDE.md#sft-fine-tuning) for architecture details (loss math, checkpoint format, frozen-vs-trainable parameters).
+
 ## Notebooks
 
 | Notebook | Description |
@@ -148,7 +185,7 @@ python scripts/evaluate.py --model guidelabs/steerling-8b --tasks hellaswag arc_
   Steerling-8B in bfloat16 requires approximately 18 GB VRAM. It fits on a single H100, A100 (40GB or 80GB), A6000 (48GB), or RTX 4090 (24GB).
 
 - **Can I fine-tune this model?**\
-  Yes, but fine-tuning code is not included in this release. If there is sufficient interest, we will support it in a future release.
+  Yes — see the [Fine-Tuning (SFT)](#fine-tuning-sft) section above. LoRA-based SFT on Tulu-3 is wired up in `scripts/sft_train.py` (single-GPU) and `scripts/sft_train_ddp.py` (multi-GPU via `torchrun`), with resume-from-HuggingFace-checkpoint support.
 
 - **What tokenizer does Steerling-8B use?**\
   OpenAI's `cl100k_base` tokenizer (via tiktoken) with 4 additional special tokens: `<|pad|>`, `<|bos|>`, `<|endofchunk|>`, and `<|mask|>`, for a total vocabulary of 100,281 tokens.

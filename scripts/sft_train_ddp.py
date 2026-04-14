@@ -11,10 +11,11 @@ Launch with torchrun:
 Single-node 4×H100 on Modal:
     torchrun --nproc_per_node=4 scripts/sft_train_ddp.py \
         --model guidelabs/steerling-8b \
-        --max-steps 5000 \
+        --num-epochs 1 \
         --gradient-accumulation-steps 8
 
 Effective batch size = batch_size × n_gpus × gradient_accumulation_steps
+max_steps = ceil(len(dataset) / effective_batch_size) × num_epochs (unless overridden)
 """
 
 from __future__ import annotations
@@ -76,9 +77,12 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
-    parser.add_argument("--max-steps", type=int, required=True,
-                        help="Total gradient update steps (use run_sft.py to auto-compute from epochs)")
-    parser.add_argument("--warmup-steps", type=int, default=200)
+    parser.add_argument("--num-epochs", type=int, default=1,
+                        help="Full passes over the dataset. Used to auto-compute max-steps.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Total optimizer steps. If unset, computed from --num-epochs × dataset size.")
+    parser.add_argument("--warmup-steps", type=int, default=None,
+                        help="Linear warmup steps. If unset, defaults to 1%% of max-steps.")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=100)
@@ -197,24 +201,43 @@ def main() -> None:
         logger.info(f"Trainable: {trainable/1e6:.1f}M / {total/1e9:.2f}B")
 
     # --- Dataset ---
-    # Load pre-tokenised cache (built by prepare_dataset Modal function).
-    # Falls back to on-the-fly tokenisation if cache is missing.
-    from steerling.data.sft_dataset import Tulu3SFTDataset
+    # Unified cache-or-build: rank-0 builds (downloads + tokenises) if missing,
+    # other ranks wait at the barrier and then load the resulting cache.
+    from steerling.data.sft_dataset import load_or_build_cache
 
     dataset_cache = Path(args.output_dir) / "dataset_cache.pt"
-    assert dataset_cache.exists(), (
-        f"Pre-tokenised dataset required for DDP: {dataset_cache}\n"
-        "Run: python modal_utils/run_sft.py prepare"
-    )
     if is_main:
-        logger.info(f"Loading pre-tokenised dataset from {dataset_cache}")
-    examples = torch.load(dataset_cache, weights_only=False)
-    dataset = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
-    dataset.tokenizer = tokenizer
-    dataset.max_seq_len = args.max_seq_len
-    dataset.examples = examples
+        dataset = load_or_build_cache(
+            tokenizer,
+            dataset_cache,
+            max_seq_len=args.max_seq_len,
+            seed=args.seed,
+            hf_dataset_id=args.hf_dataset_id,
+        )
+    dist.barrier()
+    if not is_main:
+        dataset = load_or_build_cache(
+            tokenizer,
+            dataset_cache,
+            max_seq_len=args.max_seq_len,
+            seed=args.seed,
+            hf_dataset_id=args.hf_dataset_id,
+        )
     if is_main:
-        logger.info(f"Dataset: {len(dataset):,} examples (from cache)")
+        logger.info(f"Dataset: {len(dataset):,} examples")
+
+    # Compute max_steps/warmup_steps from dataset size if not explicitly passed
+    import math
+    effective_bs = args.batch_size * world_size * args.gradient_accumulation_steps
+    if args.max_steps is None:
+        args.max_steps = math.ceil(len(dataset) / effective_bs) * args.num_epochs
+    if args.warmup_steps is None:
+        args.warmup_steps = max(1, args.max_steps // 100)
+    if is_main:
+        logger.info(
+            f"num_epochs={args.num_epochs}  effective_bs={effective_bs}  "
+            f"max_steps={args.max_steps:,}  warmup_steps={args.warmup_steps}"
+        )
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(
@@ -264,8 +287,10 @@ def main() -> None:
     epoch = 0
 
     if is_main:
-        logger.info(f"Starting DDP training: {args.max_steps} steps, "
-                    f"{world_size} GPUs, effective bs={args.batch_size * world_size * args.gradient_accumulation_steps}")
+        logger.info(
+            f"Starting DDP training: {start_step} -> {args.max_steps} steps, "
+            f"{world_size} GPUs, effective bs={args.batch_size * world_size * args.gradient_accumulation_steps}"
+        )
 
     while step < args.max_steps:
         optimizer.zero_grad()
@@ -292,22 +317,18 @@ def main() -> None:
                     logits, outputs = model(noisy_ids, minimal_output=True)
                     l_token = compute_token_loss(logits, input_ids, noisy_ids, p_mask, tokenizer.mask_token_id)
                     l_rec   = compute_rec_loss(outputs.hidden, outputs.known_features, outputs.unk_hat)
-                    loss = l_token + args.lambda_rec * l_rec
+                    l_indep = compute_indep_loss(
+                        base_model.known_head.concept_embedding.weight,
+                        base_model.unknown_head,
+                        sample_size=sft_config.indep_sample_size,
+                    )
+                    loss = l_token + args.lambda_rec * l_rec + args.lambda_indep * l_indep
 
                 (loss / grad_accum).backward()
 
-            for k, v in [("l_token", l_token.item()), ("l_rec", l_rec.item())]:
+            for k, v in [("l_token", l_token.item()), ("l_rec", l_rec.item()), ("l_indep", l_indep.item())]:
                 accum[k] = accum.get(k, 0.0) + v / grad_accum
 
-        # Independence loss — separate backward (keeps graph shape consistent for static_graph)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            l_indep = compute_indep_loss(
-                base_model.known_head.concept_embedding.weight,
-                base_model.unknown_head,
-                sample_size=sft_config.indep_sample_size,
-            )
-            (args.lambda_indep * l_indep).backward()
-        accum["l_indep"] = l_indep.item()
         accum["loss"] = accum["l_token"] + args.lambda_rec * accum["l_rec"] + args.lambda_indep * accum["l_indep"]
 
         torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)

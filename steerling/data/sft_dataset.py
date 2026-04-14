@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
@@ -260,3 +261,48 @@ class Tulu3SFTDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         return self.examples[idx]
+
+
+def load_or_build_cache(
+    tokenizer: SteerlingTokenizer,
+    cache_path: str | Path,
+    *,
+    max_seq_len: int = 2048,
+    seed: int = 42,
+    hf_dataset_id: str = "darklord1611/tulu-3-sft-mixture-english-clean",
+    sources: Sequence[str] | None = None,
+    max_samples: int | None = None,
+    apply_filters: bool = False,
+) -> Tulu3SFTDataset:
+    """Load a pre-tokenised `dataset_cache.pt` if present, else build and save it.
+
+    Both single-GPU and DDP training use this so resumed runs don't re-tokenise
+    the full Tulu-3 mixture on every launch. The cache holds the list of
+    example dicts (`input_ids`, `loss_mask`) produced by `Tulu3SFTDataset`.
+    """
+    cache_path = Path(cache_path)
+
+    if cache_path.exists():
+        logger.info(f"Loading pre-tokenised dataset cache: {cache_path}")
+        examples = torch.load(cache_path, weights_only=False)
+        ds = Tulu3SFTDataset.__new__(Tulu3SFTDataset)
+        ds.tokenizer = tokenizer
+        ds.max_seq_len = max_seq_len
+        ds.examples = examples
+        logger.info(f"Loaded {len(examples):,} examples from cache")
+        return ds
+
+    logger.info(f"No cache at {cache_path}; building from {hf_dataset_id}...")
+    ds = Tulu3SFTDataset(
+        tokenizer,
+        max_seq_len=max_seq_len,
+        sources=sources,
+        max_samples=max_samples,
+        seed=seed,
+        hf_dataset_id=hf_dataset_id,
+        apply_filters=apply_filters,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(ds.examples, cache_path)
+    logger.info(f"Saved {len(ds):,} examples to {cache_path}")
+    return ds

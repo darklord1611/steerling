@@ -69,12 +69,16 @@ def main() -> None:
     # Training
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--max-steps", type=int, default=1000)
-    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--num-epochs", type=int, default=1,
+                        help="Full passes over the dataset. Used to auto-compute max-steps.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Total optimizer steps. If unset, computed from --num-epochs × dataset size.")
+    parser.add_argument("--warmup-steps", type=int, default=None,
+                        help="Linear warmup steps. If unset, defaults to 1%% of max-steps.")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--log-every", type=int, default=10)
-    parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--save-every", type=int, default=100)
 
     # Output
     parser.add_argument("--output-dir", type=str, default="sft_output")
@@ -109,24 +113,39 @@ def main() -> None:
         model.transformer.lm_head = torch.nn.Linear(old_emb.shape[1], new_size, bias=False)
         model.transformer.lm_head.weight = model.transformer.tok_emb.weight  # re-tie
 
-    # Load full Tulu-3 SFT mixture
-    from steerling.data.sft_dataset import Tulu3SFTDataset
+    # Load full Tulu-3 SFT mixture (cache-or-build: matches DDP path)
+    from pathlib import Path
 
-    logger.info(f"Loading dataset: {args.hf_dataset_id}")
-    dataset = Tulu3SFTDataset(
+    from steerling.data.sft_dataset import load_or_build_cache
+
+    cache_path = Path(args.output_dir) / "dataset_cache.pt"
+    dataset = load_or_build_cache(
         tokenizer,
+        cache_path,
         max_seq_len=args.max_seq_len,
         seed=args.seed,
         hf_dataset_id=args.hf_dataset_id,
     )
-    logger.info(f"Total examples: {len(dataset)}")
 
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=4,
         pin_memory=True,
+        drop_last=True,
+    )
+
+    # Compute max_steps/warmup_steps from dataset size if not explicitly passed
+    import math
+    effective_bs = args.batch_size * args.gradient_accumulation_steps
+    if args.max_steps is None:
+        args.max_steps = math.ceil(len(dataset) / effective_bs) * args.num_epochs
+    if args.warmup_steps is None:
+        args.warmup_steps = max(1, args.max_steps // 100)
+    logger.info(
+        f"num_epochs={args.num_epochs}  effective_bs={effective_bs}  "
+        f"max_steps={args.max_steps:,}  warmup_steps={args.warmup_steps}"
     )
 
     # Setup trainer
@@ -153,22 +172,23 @@ def main() -> None:
 
     trainer = SFTTrainer(model, tokenizer, sft_config)
 
+    start_step = 0
     if args.resume_from:
         from steerling.training.sft_trainer import load_checkpoint
-        load_checkpoint(model, args.resume_from, optimizer=trainer.optimizer)
-        logger.info(f"Resumed from: {args.resume_from}")
+        start_step = load_checkpoint(model, args.resume_from, optimizer=trainer.optimizer)
+        logger.info(f"Resumed from: {args.resume_from} (step {start_step})")
 
     # Train
     logger.info("Starting SFT training...")
     logger.info(f"  Dataset: {args.hf_dataset_id} ({len(dataset):,} examples)")
-    logger.info(f"  Steps: {args.max_steps}")
+    logger.info(f"  Steps: {start_step} -> {args.max_steps}")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  LR: {args.lr}")
     logger.info(f"  LoRA rank: {args.lora_r}")
     logger.info(f"  Lambda rec: {args.lambda_rec}")
     logger.info(f"  Lambda indep: {args.lambda_indep}")
 
-    history = trainer.train(dataloader)
+    history = trainer.train(dataloader, start_step=start_step)
 
     logger.info(f"Training complete. Final loss: {history[-1]['loss']:.4f}")
     logger.info(f"Checkpoint saved to {args.output_dir}/final")

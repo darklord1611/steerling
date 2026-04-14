@@ -27,7 +27,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-CLAUDE.md
+# CLAUDE.md
 debug*
 changes*
 notebooks/generation_from_weights.ipynb
@@ -237,6 +237,5 @@ jobs/
 wandb/
 
 **results**/
-IFBench
 
 modal_utils/sft_jobs/
