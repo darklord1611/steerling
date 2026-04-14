@@ -1,0 +1,3 @@
+[submodule "IFBench"]
+	path = IFBench
+	url = https://github.com/allenai/IFBench.git
