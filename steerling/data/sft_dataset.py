@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Sequence
@@ -302,6 +303,100 @@ def load_or_build_cache(
         hf_dataset_id=hf_dataset_id,
         apply_filters=apply_filters,
     )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(ds.examples, cache_path)
+    logger.info(f"Saved {len(ds):,} examples to {cache_path}")
+    return ds
+
+
+class LocalJSONLSFTDataset(Dataset):
+    """SFT dataset from a local JSONL file.
+
+    Each line must be a JSON object with a ``messages`` field holding
+    a list of ``{"role", "content"}`` dicts. Matches the format of the
+    Emergent Misalignment datasets (insecure_code, bad_medical_advice, etc.).
+    """
+
+    def __init__(
+        self,
+        tokenizer: SteerlingTokenizer,
+        jsonl_path: str | Path,
+        max_seq_len: int = 1024,
+    ):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+
+        jsonl_path = Path(jsonl_path)
+        logger.info(f"Loading {jsonl_path}...")
+
+        self.examples: list[dict[str, torch.Tensor]] = []
+        skipped = 0
+
+        with jsonl_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                example = json.loads(line)
+                messages = example["messages"]
+
+                roles = {m["role"] for m in messages}
+                if "user" not in roles or "assistant" not in roles:
+                    skipped += 1
+                    continue
+
+                text = tokenizer.apply_chat_template(messages, add_generation_prompt=False)
+                token_ids = tokenizer.encode(text, add_special_tokens=False)
+                loss_mask = build_loss_mask(token_ids, tokenizer)
+
+                if len(token_ids) > max_seq_len:
+                    token_ids = token_ids[:max_seq_len]
+                    loss_mask = loss_mask[:max_seq_len]
+
+                if not any(loss_mask):
+                    skipped += 1
+                    continue
+
+                pad_len = max_seq_len - len(token_ids)
+                token_ids = token_ids + [tokenizer.pad_token_id] * pad_len
+                loss_mask = loss_mask + [0] * pad_len
+
+                self.examples.append({
+                    "input_ids": torch.tensor(token_ids, dtype=torch.long),
+                    "loss_mask": torch.tensor(loss_mask, dtype=torch.long),
+                })
+
+        logger.info(f"Loaded {len(self.examples):,} examples (skipped {skipped})")
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return self.examples[idx]
+
+
+def load_or_build_local_cache(
+    tokenizer: SteerlingTokenizer,
+    cache_path: str | Path,
+    jsonl_path: str | Path,
+    *,
+    max_seq_len: int = 1024,
+) -> LocalJSONLSFTDataset:
+    """Load a pre-tokenised cache if present, else tokenise ``jsonl_path`` and save it."""
+    cache_path = Path(cache_path)
+
+    if cache_path.exists():
+        logger.info(f"Loading pre-tokenised dataset cache: {cache_path}")
+        examples = torch.load(cache_path, weights_only=False)
+        ds = LocalJSONLSFTDataset.__new__(LocalJSONLSFTDataset)
+        ds.tokenizer = tokenizer
+        ds.max_seq_len = max_seq_len
+        ds.examples = examples
+        logger.info(f"Loaded {len(examples):,} examples from cache")
+        return ds
+
+    logger.info(f"No cache at {cache_path}; building from {jsonl_path}...")
+    ds = LocalJSONLSFTDataset(tokenizer, jsonl_path, max_seq_len=max_seq_len)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(ds.examples, cache_path)
     logger.info(f"Saved {len(ds):,} examples to {cache_path}")

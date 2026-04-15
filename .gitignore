@@ -238,4 +238,6 @@ wandb/
 
 **results**/
 
+datasets/
+
 modal_utils/sft_jobs/
