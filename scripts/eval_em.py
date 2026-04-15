@@ -151,7 +151,12 @@ def load_generator(base_model: str, checkpoint_dir: str | None, device: str) -> 
 
     model = gen.model
     tok = gen.tokenizer
+
     ckpt = Path(checkpoint_dir)
+    if not ckpt.exists():
+        from huggingface_hub import snapshot_download
+        logger.info(f"Local path not found; downloading from HF: {checkpoint_dir}")
+        ckpt = Path(snapshot_download(repo_id=checkpoint_dir, repo_type="model"))
 
     # Resize embeddings for ChatML tokens (match training-time resize).
     if model.transformer.tok_emb.weight.shape[0] < tok.vocab_size:
