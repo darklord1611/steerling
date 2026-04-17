@@ -86,16 +86,14 @@ def prepare_dataset(
     tokenizer = generator.tokenizer
     del generator  # free memory
 
-    from steerling.data.sft_dataset import Tulu3SFTDataset
-    print(f"Tokenising {hf_dataset_id} (max_seq_len={max_seq_len})...")
-    dataset = Tulu3SFTDataset(
-        tokenizer, max_seq_len=max_seq_len, seed=seed, hf_dataset_id=hf_dataset_id,
-    )
-
+    from steerling.data.sft_dataset import load_or_build_cache
     cache_path = Path(output_dir) / "dataset_cache.pt"
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(dataset.examples, cache_path)
-    print(f"✓ Saved {len(dataset):,} examples to {cache_path}")
+    print(f"Tokenising {hf_dataset_id} (max_seq_len={max_seq_len})...")
+    dataset = load_or_build_cache(
+        tokenizer, cache_path, max_seq_len=max_seq_len, seed=seed,
+        hf_dataset_id=hf_dataset_id,
+    )
+    print(f"✓ {len(dataset):,} examples ready")
 
     checkpoint_volume.commit()
     return {"status": "success", "n_examples": len(dataset), "cache_path": str(cache_path)}

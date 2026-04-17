@@ -117,7 +117,8 @@ def build_loss_mask(token_ids: list[int], tokenizer: SteerlingTokenizer) -> list
     """Build a per-token loss mask: 1 for assistant content, 0 elsewhere.
 
     Scans for <|im_start|>assistant\\n ... <|im_end|> spans and marks the
-    content tokens (excluding the delimiters themselves) as trainable.
+    content tokens plus the closing <|im_end|> (so the model learns to emit
+    the end-of-turn token and generation can stop).
     """
     im_start = tokenizer.im_start_token_id
     im_end = tokenizer.im_end_token_id
@@ -141,9 +142,9 @@ def build_loss_mask(token_ids: list[int], tokenizer: SteerlingTokenizer) -> list
                 if role_text == "assistant":
                     content_start = newline_pos + 1
                     for j in range(content_start, len(token_ids)):
+                        mask[j] = 1
                         if token_ids[j] == im_end:
                             break
-                        mask[j] = 1
             i = (newline_pos or i) + 1
         else:
             i += 1
@@ -238,9 +239,11 @@ class Tulu3SFTDataset(Dataset):
             token_ids = tokenizer.encode(text, add_special_tokens=False)
             loss_mask = build_loss_mask(token_ids, tokenizer)
 
+            # Skip examples that exceed max_seq_len instead of truncating,
+            # so every example has a complete response with <|im_end|>.
             if len(token_ids) > max_seq_len:
-                token_ids = token_ids[:max_seq_len]
-                loss_mask = loss_mask[:max_seq_len]
+                skipped += 1
+                continue
 
             if not any(loss_mask):
                 skipped += 1
@@ -280,8 +283,14 @@ def load_or_build_cache(
     Both single-GPU and DDP training use this so resumed runs don't re-tokenise
     the full Tulu-3 mixture on every launch. The cache holds the list of
     example dicts (`input_ids`, `loss_mask`) produced by `Tulu3SFTDataset`.
+
+    The cache filename is suffixed with ``_seqN`` (e.g.
+    ``dataset_cache_seq2048.pt``) so that changing ``max_seq_len`` automatically
+    triggers a rebuild instead of silently loading stale data.
     """
     cache_path = Path(cache_path)
+    # Embed max_seq_len in the filename so different lengths don't collide.
+    cache_path = cache_path.with_stem(f"{cache_path.stem}_seq{max_seq_len}")
 
     if cache_path.exists():
         logger.info(f"Loading pre-tokenised dataset cache: {cache_path}")
@@ -349,9 +358,11 @@ class LocalJSONLSFTDataset(Dataset):
                 token_ids = tokenizer.encode(text, add_special_tokens=False)
                 loss_mask = build_loss_mask(token_ids, tokenizer)
 
+                # Skip examples that exceed max_seq_len instead of truncating,
+                # so every example has a complete response with <|im_end|>.
                 if len(token_ids) > max_seq_len:
-                    token_ids = token_ids[:max_seq_len]
-                    loss_mask = loss_mask[:max_seq_len]
+                    skipped += 1
+                    continue
 
                 if not any(loss_mask):
                     skipped += 1
@@ -384,6 +395,7 @@ def load_or_build_local_cache(
 ) -> LocalJSONLSFTDataset:
     """Load a pre-tokenised cache if present, else tokenise ``jsonl_path`` and save it."""
     cache_path = Path(cache_path)
+    cache_path = cache_path.with_stem(f"{cache_path.stem}_seq{max_seq_len}")
 
     if cache_path.exists():
         logger.info(f"Loading pre-tokenised dataset cache: {cache_path}")

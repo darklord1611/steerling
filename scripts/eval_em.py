@@ -365,8 +365,8 @@ def main() -> None:
                         help="Fine-tuned checkpoint dir. If omitted, evaluates the base model.")
     parser.add_argument("--probe", choices=["general", "medical", "both"], default="both")
     parser.add_argument("--n-samples", type=int, default=25)
-    parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--steps", type=int, default=128,
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--steps", type=int, default=256,
                         help="Diffusion steps. Must be >= num_blocks (=gen_len/64). "
                              "128 steps @ 512 tokens is ~4x faster than the full 512-step default "
                              "with modest quality loss.")
