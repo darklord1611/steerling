@@ -272,11 +272,16 @@ def load_checkpoint(
             state_path = None
 
     # Load LoRA adapter weights.
-    # If setup_lora() has already wrapped the transformer, use load_adapter to avoid
-    # double-wrapping (which would corrupt the trainable parameter count).
+    # If setup_lora() has already wrapped the transformer, load weights directly to
+    # avoid peft 0.19 _maybe_shard_state_dict_for_tp importing EmbeddingParallel
+    # (missing in transformers <4.58).
     from peft import PeftModel
     if isinstance(model.transformer, PeftModel):
-        model.transformer.load_adapter(lora_dir, adapter_name="default", set_as_active=True)
+        from safetensors.torch import load_file as _load_safetensors
+        _st = _Path(lora_dir) / "adapter_model.safetensors"
+        _bin = _Path(lora_dir) / "adapter_model.bin"
+        adapter_state = _load_safetensors(str(_st)) if _st.exists() else torch.load(str(_bin), map_location="cpu")
+        model.transformer.load_state_dict(adapter_state, strict=False)
     else:
         model.transformer = PeftModel.from_pretrained(model.transformer, lora_dir)
     logger.info(f"Loaded LoRA adapter from {lora_dir}")

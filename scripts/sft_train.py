@@ -44,7 +44,7 @@ def main() -> None:
     #   seq=2048 → 58.2GB, 0.72s/step, 2838 tok/s  (~144h/epoch)
     #   seq=3072 → 91.1GB, 1.35s/step, 2268 tok/s  (~270h/epoch) ← max, covers p97 of dataset
     #   seq=3584 → OOM
-    parser.add_argument("--max-seq-len", type=int, default=3072)
+    parser.add_argument("--max-seq-len", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--hf-dataset-id", type=str,
