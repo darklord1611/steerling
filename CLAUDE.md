@@ -155,12 +155,15 @@ This is why the unknown head detaches from the LM gradient — it has its own de
 - LoRA adapters on `transformer.blocks.{i}.attn.{c_attn,c_proj}` (default r=16, α=32, dropout=0.05)
 - `known_head.concept_predictor.weight` — the sigmoid predictor learns from the ℒ_token gradient flowing back through `composed = known_features + unk_hat + epsilon`
 - All `unknown_head.*` params (both predictor and factorized embeddings)
-- Frozen: `known_head.concept_embedding.weight` (preserves the human-labeled concept vocabulary), all transformer base weights, `tok_emb`/`lm_head`
+- ChatML special token embeddings via PEFT `trainable_token_indices`: `<|mask|>` (100280), `<|im_start|>` (100281), `<|im_end|>` (100282). These tokens are added during embedding resize (base vocab 100281 → 100283) and initialized to the mean of pretrained embeddings. PEFT learns a small delta (`trainable_tokens_delta (3, 4096)`) on top of the frozen base, saved/loaded as part of the LoRA adapter checkpoint.
+- Frozen: `known_head.concept_embedding.weight` (preserves the human-labeled concept vocabulary), all transformer base weights, remaining `tok_emb`/`lm_head` rows
 
 **Dataset (`darklord1611/tulu-3-sft-mixture-english-clean`):** ~717k pre-cleaned English examples. `Tulu3SFTDataset` (`sft_dataset.py:167`) tokenizes everything upfront into memory, so both scripts now route through `load_or_build_cache()` which writes `{output_dir}/dataset_cache.pt` on first run and reuses it on every resume. DDP has rank-0 build the cache behind a `dist.barrier()` while other ranks wait.
 
+**ChatML token embedding fix (2026-05-06):** The base model's vocab (100281 tokens) doesn't include `<|im_start|>` (100281) or `<|im_end|>` (100282). During SFT, embeddings are resized to 100283 and new rows initialized to the mean of pretrained embeddings. Previously these rows were frozen by PEFT (tok_emb is not a LoRA target), so the model couldn't learn a discriminative representation for `<|im_end|>` — it failed to terminate responses, causing role-header leakage ("assistant" appearing in output). Fix: pass `trainable_token_indices={"tok_emb": [mask, im_start, im_end]}` to `LoraConfig`, which learns a small delta on those three rows. Applied to all three training scripts (`sft_train.py`, `sft_train_ddp.py`, `sft_train_em.py`).
+
 **Checkpoint format** (`SFTTrainer.save` / `_save` in DDP):
-- `lora_adapter/` — PEFT adapter directory
+- `lora_adapter/` — PEFT adapter directory (includes `trainable_tokens_delta` for ChatML embeddings)
 - `head_weights.pt` — `known_head.concept_predictor.weight` + trainable `unknown_head.*`
 - `optimizer.pt` — Adam state
 - `training_state.json` — `{"step": N}`
