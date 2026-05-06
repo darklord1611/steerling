@@ -44,6 +44,11 @@ class SFTConfig:
     save_every: int = 500
     dtype: str = "bfloat16"
 
+    # Embedding — token indices whose embeddings should be fine-tuned.
+    # Passed directly to PEFT's LoraConfig.trainable_token_indices.
+    # Use dict form {"tok_emb": [id, ...]} to target the model's embedding module.
+    trainable_token_indices: dict[str, list[int]] | list[int] | None = None
+
     # Output
     output_dir: str = "sft_output"
 
@@ -70,6 +75,7 @@ def setup_lora(model: InterpretableCausalDiffusionLM, config: SFTConfig) -> nn.M
         target_modules=config.lora_target_modules,
         lora_dropout=config.lora_dropout,
         bias="none",
+        trainable_token_indices=config.trainable_token_indices,
     )
     # PEFT expects model.config to support .get(); Pydantic BaseModel does not
     if hasattr(model.transformer, "config") and not hasattr(model.transformer.config, "get"):

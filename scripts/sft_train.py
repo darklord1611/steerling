@@ -168,6 +168,11 @@ def main() -> None:
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
         wandb_run_name=args.wandb_run_name,
+        trainable_token_indices={"tok_emb": [
+            tokenizer.mask_token_id,
+            tokenizer.im_start_token_id,
+            tokenizer.im_end_token_id,
+        ]},
     )
 
     trainer = SFTTrainer(model, tokenizer, sft_config)

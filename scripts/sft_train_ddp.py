@@ -177,6 +177,11 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         max_grad_norm=args.max_grad_norm,
         output_dir=args.output_dir,
+        trainable_token_indices={"tok_emb": [
+            tokenizer.mask_token_id,
+            tokenizer.im_start_token_id,
+            tokenizer.im_end_token_id,
+        ]},
     )
     model = setup_lora(model, sft_config)
 
