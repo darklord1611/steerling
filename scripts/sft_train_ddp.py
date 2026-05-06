@@ -99,7 +99,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # --- Distributed setup ---
-    dist.init_process_group(backend="nccl")
+    from datetime import timedelta
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=60))
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = dist.get_world_size()
     rank = dist.get_rank()
@@ -211,7 +212,13 @@ def main() -> None:
     from steerling.data.sft_dataset import load_or_build_cache
 
     dataset_cache = Path(args.output_dir) / "dataset_cache.pt"
+    # The actual cache file includes seq length suffix (e.g. dataset_cache_seq2048.pt)
+    actual_cache = dataset_cache.with_stem(f"{dataset_cache.stem}_seq{args.max_seq_len}")
+    logger.info(f"[rank{rank}] Looking for dataset cache at: {actual_cache}")
+    logger.info(f"[rank{rank}] Cache exists: {actual_cache.exists()}")
+
     if is_main:
+        logger.info(f"[rank{rank}] Rank 0 loading/building dataset...")
         dataset = load_or_build_cache(
             tokenizer,
             dataset_cache,
@@ -219,8 +226,14 @@ def main() -> None:
             seed=args.seed,
             hf_dataset_id=args.hf_dataset_id,
         )
+        logger.info(f"[rank{rank}] Rank 0 dataset ready: {len(dataset):,} examples")
+
+    logger.info(f"[rank{rank}] Entering barrier...")
     dist.barrier()
+    logger.info(f"[rank{rank}] Passed barrier")
+
     if not is_main:
+        logger.info(f"[rank{rank}] Loading dataset cache...")
         dataset = load_or_build_cache(
             tokenizer,
             dataset_cache,
@@ -228,8 +241,7 @@ def main() -> None:
             seed=args.seed,
             hf_dataset_id=args.hf_dataset_id,
         )
-    if is_main:
-        logger.info(f"Dataset: {len(dataset):,} examples")
+        logger.info(f"[rank{rank}] Dataset loaded: {len(dataset):,} examples")
 
     # Compute max_steps/warmup_steps from dataset size if not explicitly passed
     import math
