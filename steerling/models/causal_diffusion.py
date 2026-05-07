@@ -50,6 +50,12 @@ class CausalDiffusionLM(nn.Module):
         if config.weight_sharing:
             self.tok_emb.weight = self.lm_head.weight
 
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.tok_emb
+
+    def get_output_embeddings(self) -> nn.Linear:
+        return self.lm_head
+
     def forward(
         self,
         input_ids: torch.Tensor,
