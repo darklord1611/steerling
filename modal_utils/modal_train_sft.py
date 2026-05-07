@@ -24,7 +24,7 @@ training_image = (
         "pandas~=2.2.3",
         # SFT-specific
         "datasets>=2.0.0",
-        "peft>=0.10.0",
+        "peft==0.18.1",
         "tqdm",
         "wandb"
     )

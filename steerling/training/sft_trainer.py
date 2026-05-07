@@ -83,6 +83,12 @@ def setup_lora(model: InterpretableCausalDiffusionLM, config: SFTConfig) -> nn.M
 
         if isinstance(model.transformer.config, PydanticBaseModel):
             model.transformer.config = model.transformer.config.model_dump()
+    # PEFT's trainable_token_indices requires get_input/output_embeddings on the model.
+    # The HF-hosted CausalDiffusionLM may not have these methods, so monkey-patch them.
+    if not hasattr(model.transformer, "get_input_embeddings"):
+        model.transformer.get_input_embeddings = lambda: model.transformer.tok_emb
+    if not hasattr(model.transformer, "get_output_embeddings"):
+        model.transformer.get_output_embeddings = lambda: model.transformer.lm_head
     model.transformer = get_peft_model(model.transformer, lora_config)
 
     # Freeze known concept embeddings (preserve human-labeled vocabulary)
