@@ -130,7 +130,7 @@ async def submit_job(
     lora_dropout: float = 0.05,
     lambda_rec: float = 0.1,
     lambda_indep: float = 0.01,
-    save_every: int = 200,
+    save_every: int = 100,
     log_every: int = 50,
     output_dir: str = "/checkpoints/sft_output",
     resume_from: Optional[str] = None,
